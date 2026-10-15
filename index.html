@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JOSH — Echoes of the Shattered World</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div id="game-container">
+  <canvas id="gameCanvas" width="960" height="640"></canvas>
+  <div id="ui">
+    <div id="hud">
+      <div id="fragments">Fragments: <span id="fragCount">0</span></div>
+      <div id="world">World: <span id="worldName">Glade of Whispers</span></div>
+      <div id="deaths">Deaths: <span id="deathCount">0</span></div>
+    </div>
+    <div id="dialogue" class="hidden">
+      <div id="dialogueName"></div>
+      <div id="dialogueText"></div>
+      <div id="dialogueHint">Press <span class="kbd">E</span> to continue</div>
+    </div>
+    <div id="questLog" class="hidden">
+      <div id="questLogTitle">Quests</div>
+      <div id="questLogList"></div>
+    </div>
+  </div>
+  <div id="overlay" class="hidden"></div>
+  <div id="startMenu" class="menu">
+    <h1>JOSH</h1>
+    <div class="subtitle">Echoes of the Shattered World</div>
+    <p class="story">The world shattered into floating fragments. You are Josh, the last echo.<br>
+    Travel the five realms, complete the quests, collect every fragment, and restore what was lost.</p>
+    <button id="btnStart">Begin Journey</button>
+    <button id="btnControls">Controls</button>
+  </div>
+  <div id="controlsMenu" class="menu hidden">
+    <h1>Controls</h1>
+    <div class="ctrl"><span class="kbd">ARROWS</span> / <span class="kbd">WASD</span> — Move</div>
+    <div class="ctrl"><span class="kbd">SPACE</span> / <span class="kbd">UP</span> — Jump</div>
+    <div class="ctrl"><span class="kbd">E</span> — Talk to NPCs</div>
+    <div class="ctrl"><span class="kbd">Q</span> — Quest Log</div>
+    <div class="ctrl"><span class="kbd">R</span> — Restart Level</div>
+    <div class="ctrl hint">Collect all fragments and reach the exit in each realm.</div>
+    <button id="btnBack">Back</button>
+  </div>
+  <div id="gameOverMenu" class="menu hidden">
+    <h1 id="gameOverTitle">Game Over</h1>
+    <p id="gameOverText"></p>
+    <button id="btnRetry">Try Again</button>
+    <button id="btnMainMenu">Main Menu</button>
+  </div>
+  <div id="victoryMenu" class="menu hidden">
+    <h1>World Restored</h1>
+    <p>You gathered every fragment and healed the shattered world.</p>
+    <button id="btnPlayAgain">Play Again</button>
+  </div>
+</div>
+<script src="js/game.js"></script>
+<script src="js/levels.js"></script>
+</body>
+</html>
