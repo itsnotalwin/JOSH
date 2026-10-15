@@ -1,45 +1,48 @@
 /* JOSH — Echoes of the Shattered World
-   Main game engine: loop, input, physics, audio, sprite generation, state machine.
+   Full game engine with Kenney CC0 assets, polished platformer physics,
+   8 realms, NPC dialogue, quests, particles, and audio.
 */
 
 const CANVAS_W = 960;
 const CANVAS_H = 640;
-const GRAVITY = 0.8;
-const GROUND_FRICTION = 0.84;
-const AIR_FRICTION = 0.965;
-const ACCEL = 1.05;
-const MAX_SPEED = 6;
-const JUMP_FORCE = -15;
-const DOUBLE_JUMP_FORCE = -13.5;
-const WALL_SLIDE_MAX = 2.2;
-const WALL_JUMP_X = 9;
-const WALL_JUMP_Y = -13.5;
+const TILE = 18;
+const GRAVITY = 0.75;
+const MAX_FALL = 18;
+const GROUND_FRICTION = 0.82;
+const AIR_FRICTION = 0.955;
+const ACCEL = 1.1;
+const MAX_SPEED = 5.5;
+const JUMP_FORCE = -14;
+const DOUBLE_JUMP_FORCE = -12.5;
+const COYOTE_TIME = 0.09;
+const JUMP_BUFFER = 0.09;
 
 const STATE_MENU = 0;
 const STATE_PLAYING = 1;
 const STATE_DIALOGUE = 2;
-const STATE_GAMEOVER = 3;
-const STATE_VICTORY = 4;
-const STATE_LEVEL_TRANSITION = 5;
+const STATE_VICTORY = 3;
+const STATE_LEVEL_TRANSITION = 4;
 
 const FRAGMENTS_PER_LEVEL = 3;
-const NUM_LEVELS = 5;
+const NUM_LEVELS = 8;
 
 let canvas, ctx;
 let game;
 let keys = {};
+let justPressed = {};
 let camera = { x: 0, y: 0 };
 let sprites = {};
 let audioCtx = null;
 let audioEnabled = false;
+let lastTime = 0;
 
+// ── Audio ──────────────────────────────────────────────────────────
 function initAudio() {
   if (!audioCtx) {
     try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { audioCtx = null; }
   }
   if (audioCtx) audioEnabled = true;
 }
-
 function playTone(freq, type, duration, vol, start) {
   if (!audioEnabled || !audioCtx) return;
   const t = audioCtx.currentTime + (start || 0);
@@ -47,233 +50,119 @@ function playTone(freq, type, duration, vol, start) {
   const gain = audioCtx.createGain();
   osc.type = type;
   osc.frequency.setValueAtTime(freq, t);
-  gain.gain.setValueAtTime(vol || 0.08, t);
+  gain.gain.setValueAtTime(vol || 0.07, t);
   gain.gain.exponentialRampToValueAtTime(0.001, t + duration);
   osc.connect(gain);
   gain.connect(audioCtx.destination);
   osc.start(t);
   osc.stop(t + duration);
 }
-
 const sfx = {
-  jump: () => { playTone(220, 'square', 0.12, 0.06); playTone(330, 'square', 0.08, 0.04, 0.06); },
-  doubleJump: () => { playTone(420, 'triangle', 0.14, 0.05); playTone(640, 'triangle', 0.1, 0.04, 0.08); },
-  land: () => { playTone(130, 'sawtooth', 0.07, 0.07); playTone(190, 'sawtooth', 0.06, 0.04, 0.04); },
-  collect: () => { playTone(950, 'sine', 0.1, 0.06); playTone(1150, 'sine', 0.08, 0.05, 0.05); },
-  talk: () => { playTone(220, 'sine', 0.05, 0.03); playTone(290, 'sine', 0.05, 0.03, 0.06); },
-  death: () => { playTone(120, 'sawtooth', 0.35, 0.08); playTone(95, 'sawtooth', 0.3, 0.06, 0.15); playTone(75, 'sawtooth', 0.5, 0.05, 0.3); },
-  win: () => { [440, 554, 659, 880].forEach((f, i) => playTone(f, 'square', 0.25, 0.05, i * 0.15)); },
-  levelStart: () => { playTone(300, 'square', 0.14, 0.05); playTone(460, 'square', 0.14, 0.05, 0.14); playTone(620, 'square', 0.3, 0.06, 0.28); }
+  jump: () => { playTone(200, 'square', 0.1, 0.06); playTone(300, 'square', 0.08, 0.05, 0.05); },
+  doubleJump: () => { playTone(400, 'triangle', 0.12, 0.05); playTone(600, 'triangle', 0.1, 0.04, 0.07); },
+  land: () => { playTone(120, 'sawtooth', 0.06, 0.07); playTone(180, 'sawtooth', 0.05, 0.04, 0.04); },
+  collect: () => { playTone(900, 'sine', 0.08, 0.06); playTone(1100, 'sine', 0.07, 0.05, 0.05); },
+  talk: () => { playTone(220, 'sine', 0.05, 0.03); playTone(280, 'sine', 0.05, 0.03, 0.06); },
+  death: () => { playTone(100, 'sawtooth', 0.3, 0.08); playTone(75, 'sawtooth', 0.4, 0.05, 0.15); },
+  win: () => { [440, 554, 659, 880].forEach((f, i) => playTone(f, 'square', 0.2, 0.05, i * 0.12)); },
+  levelStart: () => { playTone(280, 'square', 0.12, 0.05); playTone(440, 'square', 0.12, 0.05, 0.12); playTone(600, 'square', 0.25, 0.06, 0.24); },
 };
 
-function createSprite(w, h, draw) {
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  const cx = c.getContext('2d', { willReadFrequently: true });
-  cx.imageSmoothingEnabled = false;
-  draw(cx, w, h);
-  return c;
+// ── Asset loading ──────────────────────────────────────────────────
+function loadImage(path) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Failed to load: ' + path));
+    img.src = path;
+  });
 }
 
-function generateSprites() {
-  const skin = '#ffd47a';
-  const hair = '#3a2f4a';
-  const cloth = '#5b8cff';
-  const accent = '#f0d16a';
-
-  // Player: Josh, a small echo creature
-  sprites.player = createSprite(30, 36, (cx, w, h) => {
-    // body
-    cx.fillStyle = cloth;
-    cx.fillRect(6, 14, 18, 14);
-    // head
-    cx.fillStyle = skin;
-    cx.fillRect(8, 2, 14, 14);
-    // hair
-    cx.fillStyle = hair;
-    cx.fillRect(7, 0, 16, 6);
-    // legs
-    cx.fillStyle = '#2a2240';
-    cx.fillRect(4, 26, 10, 8);
-    cx.fillRect(16, 26, 10, 8);
-    // tail
-    cx.fillStyle = cloth;
-    cx.fillRect(-2, 12, 8, 10);
-    // eyes
-    cx.fillStyle = '#222';
-    cx.fillRect(11, 6, 4, 4);
-    cx.fillRect(15, 6, 4, 4);
-    cx.fillStyle = '#fff';
-    cx.fillRect(12, 7, 2, 2);
-    cx.fillRect(16, 7, 2, 2);
-    // mouth
-    cx.fillStyle = '#e06a6a';
-    cx.fillRect(12, 20, 6, 2);
-  });
-
-  // Fragment (collectible)
-  sprites.fragment = createSprite(24, 24, (cx, w, h) => {
-    const grad = cx.createRadialGradient(12, 12, 2, 12, 12, 12);
-    grad.addColorStop(0, '#fff');
-    grad.addColorStop(1, '#ffd700');
-    cx.fillStyle = grad;
-    cx.beginPath();
-    cx.arc(12, 12, 11, 0, Math.PI * 2);
-    cx.fill();
-    cx.strokeStyle = '#ff8c00';
-    cx.lineWidth = 2;
-    cx.stroke();
-    cx.fillStyle = '#fff';
-    cx.fillRect(10, 4, 4, 10);
-    cx.fillRect(10, 10, 4, 2);
-  });
-
-  // Exit portal
-  sprites.exit = createSprite(40, 56, (cx, w, h) => {
-    cx.fillStyle = '#2a2a40';
-    cx.fillRect(14, 8, 12, 40);
-    cx.fillStyle = '#6a5aff';
-    cx.beginPath();
-    cx.arc(20, 20, 10, 0, Math.PI * 2);
-    cx.fill();
-    cx.fillStyle = '#a78bfa';
-    cx.beginPath();
-    cx.arc(20, 20, 6, 0, Math.PI * 2);
-    cx.fill();
-  });
-
-  // Platform / ground tile
-  sprites.platform = createSprite(40, 40, (cx, w, h) => {
-    cx.fillStyle = '#5c6a42';
-    cx.fillRect(0, 0, 40, 40);
-    cx.fillStyle = '#4a5634';
-    cx.fillRect(0, 34, 40, 6);
-    cx.strokeStyle = '#3a4226';
-    cx.lineWidth = 2;
-    cx.strokeRect(2, 2, 36, 30);
-    cx.fillStyle = '#7aa05a';
-    cx.fillRect(6, 6, 8, 6);
-    cx.fillRect(26, 10, 6, 6);
-    cx.fillRect(14, 20, 6, 6);
-  });
-
-  // Floating platform variant
-  sprites.fplatform = createSprite(40, 14, (cx, w, h) => {
-    cx.fillStyle = '#6b7a50';
-    cx.fillRect(2, 2, 36, 10);
-    cx.fillStyle = '#55623c';
-    cx.fillRect(2, 10, 36, 4);
-    cx.strokeStyle = '#444e2f';
-    cx.lineWidth = 2;
-    cx.strokeRect(4, 4, 32, 6);
-  });
-
-  // Spike hazard
-  sprites.spike = createSprite(40, 40, (cx, w, h) => {
-    cx.fillStyle = '#555';
-    cx.beginPath();
-    cx.moveTo(0, 40); cx.lineTo(20, 0); cx.lineTo(40, 40); cx.closePath();
-    cx.fill();
-    cx.fillStyle = '#888';
-    cx.beginPath();
-    cx.moveTo(10, 40); cx.lineTo(20, 14); cx.lineTo(30, 40); cx.closePath();
-    cx.fill();
-  });
-
-  // Lava
-  sprites.lava = createSprite(40, 40, (cx, w, h) => {
-    cx.fillStyle = '#2a1000';
-    cx.fillRect(0, 0, 40, 40);
-    cx.fillStyle = '#ff4500';
-    cx.beginPath();
-    cx.arc(12, 32, 10, 0, Math.PI * 2);
-    cx.arc(28, 36, 10, 0, Math.PI * 2);
-    cx.arc(20, 28, 10, 0, Math.PI * 2);
-    cx.fill();
-  });
-
-  // Enemy: slug
-  sprites.enemy = createSprite(34, 22, (cx, w, h) => {
-    cx.fillStyle = '#7a2e2e';
-    cx.beginPath();
-    cx.ellipse(17, 12, 16, 9, 0, 0, Math.PI * 2);
-    cx.fill();
-    cx.fillStyle = '#5a1e1e';
-    cx.beginPath();
-    cx.ellipse(22, 10, 8, 6, 0, 0, Math.PI * 2);
-    cx.fill();
-    cx.fillStyle = '#333';
-    cx.fillRect(24, 7, 4, 4);
-  });
-
+async function loadAllAssets() {
+  const base = 'assets';
+  // Player: 8-frame run cycle (characters tile_0000-0007)
+  sprites.player = [];
+  for (let i = 0; i < 8; i++) {
+    sprites.player.push(await loadImage(`${base}/characters/tile_${String(i).padStart(4, '0')}.png`));
+  }
+  // Enemy: 3 frames (characters tile_0008-0010)
+  sprites.enemy = [];
+  for (let i = 8; i <= 10; i++) {
+    sprites.enemy.push(await loadImage(`${base}/characters/tile_${String(i).padStart(4, '0')}.png`));
+  }
   // NPC
-  sprites.npc = createSprite(30, 36, (cx, w, h) => {
-    cx.fillStyle = '#8a7a55';
-    cx.fillRect(6, 14, 18, 14);
-    cx.fillStyle = skin;
-    cx.fillRect(9, 2, 12, 14);
-    cx.fillStyle = '#5a4a35';
-    cx.fillRect(7, 0, 16, 6);
-    cx.fillStyle = '#2a2240';
-    cx.fillRect(5, 26, 10, 8);
-    cx.fillRect(15, 26, 10, 8);
-    cx.fillStyle = '#222';
-    cx.fillRect(12, 6, 3, 3);
-    cx.fillRect(15, 6, 3, 3);
-    cx.fillStyle = '#e0c78a';
-    cx.fillRect(12, 18, 6, 2);
-    cx.strokeStyle = '#6a5a3a';
-    cx.lineWidth = 2;
-    cx.strokeRect(8, 14, 14, 12);
-  });
-
-  // Checkpoint flag
-  sprites.checkpoint = createSprite(16, 40, (cx, w, h) => {
-    cx.fillStyle = '#333';
-    cx.fillRect(7, 0, 2, 40);
-    cx.fillStyle = '#e04a4a';
-    cx.fillRect(9, 4, 7, 10);
-    cx.fillStyle = '#fff';
-    cx.fillRect(9, 14, 2, 2);
-  });
+  sprites.npc = await loadImage(`${base}/characters/tile_0000.png`);
+  // Ground/platform tiles
+  sprites.platform = await loadImage(`${base}/tiles/tile_0000.png`);
+  sprites.platformAlt = await loadImage(`${base}/tiles/tile_0030.png`);
+  sprites.platformAlt2 = await loadImage(`${base}/tiles/tile_0060.png`);
+  // Hazards
+  sprites.spike = await loadImage(`${base}/tiles/tile_0015.png`);
+  sprites.lava = await loadImage(`${base}/tiles/tile_0090.png`);
+  // Collectible fragment
+  sprites.fragment = await loadImage(`${base}/tiles/tile_0165.png`);
+  // Checkpoint
+  sprites.checkpoint = await loadImage(`${base}/tiles/tile_0045.png`);
+  // Exit portal
+  sprites.exit = await loadImage(`${base}/tiles/tile_0150.png`);
+  // Backgrounds for realms (tileable 24x24)
+  sprites.bgSky = await loadImage(`${base}/backgrounds/tile_0000.png`);
+  sprites.bgCloud = await loadImage(`${base}/backgrounds/tile_0008.png`);
+  sprites.bgOrange = await loadImage(`${base}/backgrounds/tile_0004.png`);
+  sprites.bgGreen = await loadImage(`${base}/backgrounds/tile_0014.png`);
+  sprites.bgDark = await loadImage(`${base}/backgrounds/tile_0020.png`);
+  sprites.bgWhite = await loadImage(`${base}/backgrounds/tile_0016.png`);
 }
 
+// ── Particles ──────────────────────────────────────────────────────
 class Particle {
   constructor(x, y, color) {
     this.x = x; this.y = y;
-    this.vx = (Math.random() - 0.5) * 4;
-    this.vy = (Math.random() - 0.5) * 4 - 1;
+    this.vx = (Math.random() - 0.5) * 5;
+    this.vy = (Math.random() - 0.5) * 5 - 1;
     this.life = 1;
     this.color = color;
+    this.size = 3 + Math.random() * 3;
   }
   update() {
     this.x += this.vx;
     this.y += this.vy;
-    this.vy += 0.15;
-    this.life -= 0.04;
+    this.vy += 0.2;
+    this.life -= 0.05;
   }
   draw(ctx, cam) {
     ctx.globalAlpha = this.life;
     ctx.fillStyle = this.color;
-    ctx.fillRect(this.x - cam.x, this.y - cam.y, 4, 4);
+    ctx.fillRect(this.x - cam.x, this.y - cam.y, this.size, this.size);
     ctx.globalAlpha = 1;
   }
 }
+let particles = [];
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) particles.push(new Particle(x, y, color));
+}
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    particles[i].update();
+    if (particles[i].life <= 0) particles.splice(i, 1);
+  }
+}
 
+// ── Entities ───────────────────────────────────────────────────────
 class Entity {
   constructor(x, y, w, h) {
-    this.x = x; this.y = y;
-    this.w = w; this.h = h;
+    this.x = x; this.y = y; this.w = w; this.h = h;
     this.vx = 0; this.vy = 0;
     this.onGround = false;
     this.dead = false;
     this.remove = false;
   }
-  get rect() { return { left: this.x, right: this.x + this.w, top: this.y, bottom: this.y + this.h }; }
+  get left() { return this.x; }
+  get right() { return this.x + this.w; }
+  get top() { return this.y; }
+  get bottom() { return this.y + this.h; }
   collidesWith(other) {
-    const a = this.rect, b = other.rect;
-    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    return this.left < other.right && this.right > other.left && this.top < other.bottom && this.bottom > other.top;
   }
   update() {}
   draw(ctx, cam) {}
@@ -281,106 +170,126 @@ class Entity {
 
 class Player extends Entity {
   constructor(x, y) {
-    super(x, y, 22, 32);
+    super(x, y, 16, 22);
     this.dir = 1;
     this.jumps = 0;
     this.maxJumps = 2;
-    this.wallDir = 0;
-    this.wallSlide = false;
+    this.coyote = 0;
+    this.jumpBuffer = 0;
     this.invuln = 0;
     this.dead = false;
+    this.frame = 0;
+    this.frameTimer = 0;
+    this.jumpPressed = false;
   }
   update(level) {
-    if (this.dead) return;
-    const grounded = this.onGround;
+    if (this.dead) {
+      this.vy += GRAVITY;
+      if (this.vy > MAX_FALL) this.vy = MAX_FALL;
+      this.y += this.vy;
+      if (this.y > level.height + 200) this.kill();
+      return;
+    }
+    this.onGround = false;
+
+    // coyote time
+    if (this.onGround) this.coyote = COYOTE_TIME;
+    else this.coyote = Math.max(0, this.coyote - (1 / 60));
+
+    // jump buffer
+    if (this.jumpBuffer > 0) this.jumpBuffer -= (1 / 60);
+
     // horizontal input
     let ax = 0;
     if (keys['ArrowLeft'] || keys['KeyA']) { ax = -ACCEL; this.dir = -1; }
     if (keys['ArrowRight'] || keys['KeyD']) { ax = ACCEL; this.dir = 1; }
     this.vx += ax;
-    // friction
-    this.vx *= (grounded ? GROUND_FRICTION : AIR_FRICTION);
+    this.vx *= (this.onGround ? GROUND_FRICTION : AIR_FRICTION);
     if (Math.abs(this.vx) < 0.05) this.vx = 0;
-    // cap speed
     if (this.vx > MAX_SPEED) this.vx = MAX_SPEED;
     if (this.vx < -MAX_SPEED) this.vx = -MAX_SPEED;
-    // gravity
-    if (!grounded) this.vy += GRAVITY;
-    if (this.vy > 20) this.vy = 20;
 
-    // wall slide / jump
-    this.wallDir = 0;
-    this.wallSlide = false;
-    if (!grounded && Math.abs(this.vx) > 0.5) {
-      const probe = (this.dir > 0) ? { x: this.x + this.w + 2, y: this.y + 2, w: 2, h: this.h - 4 }
-                                   : { x: this.x - 2, y: this.y + 2, w: 2, h: this.h - 4 };
-      for (const p of level.platforms) {
-        if (rectsOverlap(probe, p)) {
-          this.wallDir = this.dir;
-          this.wallSlide = true;
-          if (this.vy > 0) this.vy = WALL_SLIDE_MAX;
-          break;
-        }
-      }
+    // gravity
+    if (!this.onGround) {
+      this.vy += GRAVITY;
+      if (this.vy > MAX_FALL) this.vy = MAX_FALL;
     }
 
-    // jump
-    if (keys['ArrowUp'] || keys['KeyW'] || keys['Space']) {
-      if (!this.jumpPressed) {
-        this.jumpPressed = true;
-        if (grounded) {
-          this.vy = JUMP_FORCE;
-          this.jumps = 1;
-          sfx.jump();
-        } else if (this.wallSlide) {
-          this.vx = -this.wallDir * WALL_JUMP_X;
-          this.vy = WALL_JUMP_Y;
-          this.jumps = 1;
-          sfx.jump();
-        } else if (this.jumps < this.maxJumps) {
-          this.vy = DOUBLE_JUMP_FORCE;
-          this.jumps++;
-          sfx.doubleJump();
-          spawnParticles(this.x + this.w / 2, this.y + this.h, '#a78bfa', 6);
-        }
-      }
-    } else {
+    // jump input
+    if ((keys['ArrowUp'] || keys['KeyW'] || keys['Space']) && !this.jumpPressed) {
+      this.jumpPressed = true;
+      this.jumpBuffer = JUMP_BUFFER;
+    } else if (!(keys['ArrowUp'] || keys['KeyW'] || keys['Space'])) {
       this.jumpPressed = false;
     }
-    if (this.vy < 0 && !(keys['ArrowUp'] || keys['KeyW'] || keys['Space'])) {
-      this.vy *= 0.8; // variable jump height
+
+    // execute buffered jump
+    if (this.jumpBuffer > 0) {
+      if (this.coyote > 0 || this.onGround) {
+        this.vy = JUMP_FORCE;
+        this.jumps = 1;
+        this.coyote = 0;
+        this.jumpBuffer = 0;
+        sfx.jump();
+        spawnParticles(this.x + this.w / 2, this.y + this.h, '#b8d4ff', 6);
+      } else if (this.jumps < this.maxJumps) {
+        this.vy = DOUBLE_JUMP_FORCE;
+        this.jumps++;
+        this.jumpBuffer = 0;
+        sfx.doubleJump();
+        spawnParticles(this.x + this.w / 2, this.y + this.h, '#a78bfa', 8);
+      }
     }
 
-    // apply motion
+    // variable jump height
+    if (this.vy < 0 && !(keys['ArrowUp'] || keys['KeyW'] || keys['Space'])) {
+      this.vy *= 0.85;
+    }
+
+    // reset jumps on ground
+    const wasOnGround = this.onGround;
     this.x += this.vx;
     this.resolveX(level);
     this.y += this.vy;
-    this.onGround = false;
     this.resolveY(level);
 
-    // level bounds
-    if (this.y > level.height + 200) this.kill();
+    if (this.onGround && !wasOnGround) {
+      this.jumps = 0;
+      sfx.land();
+      spawnParticles(this.x + this.w / 2, this.y + this.h, '#8a734a', 5);
+    }
 
-    if (this.invuln > 0) this.invuln--;
+    // level bounds
+    if (this.y > level.height + 150) this.kill();
+
+    // animation
+    this.frameTimer += (1 / 60);
+    if (this.onGround && Math.abs(this.vx) > 0.5) {
+      if (this.frameTimer > 0.08) { this.frame = (this.frame + 1) % 8; this.frameTimer = 0; }
+    } else {
+      this.frame = 0;
+      this.frameTimer = 0;
+    }
+
+    if (this.invuln > 0) this.invuln -= (1 / 60);
   }
   resolveX(level) {
-    const r = this.rect;
+    const r = { left: this.x, right: this.x + this.w, top: this.y, bottom: this.y + this.h };
     for (const p of level.platforms) {
       if (rectsOverlap(r, p)) {
-        if (this.vx > 0) { this.x = p.left - this.w; }
-        else if (this.vx < 0) { this.x = p.right; }
+        if (this.vx > 0) this.x = p.left - this.w;
+        else if (this.vx < 0) this.x = p.right;
         this.vx = 0;
       }
     }
   }
   resolveY(level) {
-    const r = this.rect;
+    const r = { left: this.x, right: this.x + this.w, top: this.y, bottom: this.y + this.h };
     for (const p of level.platforms) {
       if (rectsOverlap(r, p)) {
         if (this.vy > 0) {
           this.y = p.top - this.h;
           this.onGround = true;
-          this.jumps = 0;
         } else if (this.vy < 0) {
           this.y = p.bottom;
         }
@@ -395,87 +304,95 @@ class Player extends Entity {
     spawnParticles(this.x + this.w / 2, this.y + this.h / 2, '#ff6b6b', 14);
   }
   draw(ctx, cam) {
-    if (this.dead) return;
-    if (this.invuln > 0 && Math.floor(Date.now() / 60) % 2) return;
-    ctx.drawImage(sprites.player, this.x - cam.x, this.y - cam.y);
+    if (this.dead && this.invuln <= 0) return;
+    if (this.invuln > 0 && Math.floor(Date.now() / 80) % 2) return;
+    const img = sprites.player[this.frame];
+    ctx.save();
+    if (this.dir < 0) { ctx.scale(-1, 1); ctx.drawImage(img, -this.x + cam.x - this.w, this.y - cam.y, this.w, this.h); }
+    else ctx.drawImage(img, this.x - cam.x, this.y - cam.y, this.w, this.h);
+    ctx.restore();
   }
 }
 
 class Enemy extends Entity {
   constructor(x, y, range, speed) {
-    super(x, y, 30, 18);
+    super(x, y, 20, 20);
     this.startX = x;
     this.range = range;
     this.speed = speed;
     this.dir = 1;
+    this.frame = 0;
+    this.frameTimer = 0;
   }
   update(level) {
     this.x += this.dir * this.speed;
-    if (this.x < this.startX || this.x > this.startX + this.range) this.dir *= -1;
-    const r = this.rect;
+    const r = { left: this.x, right: this.x + this.w, top: this.y, bottom: this.y + this.h };
+    let hitWall = false;
     for (const p of level.platforms) {
-      if (rectsOverlap(r, p)) {
-        this.dir *= -1;
-        this.x += this.dir * 2;
-        break;
-      }
+      if (rectsOverlap(r, p)) { hitWall = true; break; }
     }
+    if (this.x < this.startX || this.x > this.startX + this.range || hitWall) {
+      this.dir *= -1;
+      this.x += this.dir * 2;
+    }
+    this.frameTimer += (1 / 60);
+    if (this.frameTimer > 0.15) { this.frame = (this.frame + 1) % sprites.enemy.length; this.frameTimer = 0; }
   }
   draw(ctx, cam) {
     if (this.dead) return;
+    const img = sprites.enemy[this.frame];
     ctx.save();
-    if (this.dir < 0) { ctx.scale(-1, 1); ctx.drawImage(sprites.enemy, -this.x + cam.x - this.w, this.y - cam.y); }
-    else ctx.drawImage(sprites.enemy, this.x - cam.x, this.y - cam.y);
+    if (this.dir < 0) { ctx.scale(-1, 1); ctx.drawImage(img, -this.x + cam.x - this.w, this.y - cam.y, this.w, this.h); }
+    else ctx.drawImage(img, this.x - cam.x, this.y - cam.y, this.w, this.h);
     ctx.restore();
   }
 }
 
 class NPC extends Entity {
-  constructor(x, y, name, dialogue, quest) {
-    super(x, y, 26, 34);
+  constructor(x, y, name, dialogue, questId) {
+    super(x, y, 20, 24);
     this.name = name;
     this.dialogue = dialogue;
-    this.quest = quest;
+    this.questId = questId;
     this.talked = false;
   }
   draw(ctx, cam) {
-    ctx.drawImage(sprites.npc, this.x - cam.x, this.y - cam.y);
-    if (this.talked && this.quest && !this.quest.done) {
+    ctx.drawImage(sprites.npc, this.x - cam.x, this.y - cam.y, this.w, this.h);
+    if (this.talked) {
       ctx.fillStyle = '#f0d16a';
       ctx.beginPath();
-      ctx.arc(this.x + 13 - cam.x, this.y - 10 - cam.y, 5, 0, Math.PI * 2);
+      ctx.arc(this.x + 10 - cam.x, this.y - 8 - cam.y, 5, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 }
 
 class Collectible extends Entity {
-  constructor(x, y, type) {
-    super(x, y, 18, 18);
-    this.type = type;
-    this.floatOff = Math.random() * Math.PI * 2;
+  constructor(x, y) {
+    super(x, y, 14, 14);
     this.baseY = y;
+    this.floatOff = Math.random() * Math.PI * 2;
   }
   update() {
-    this.y = this.baseY + Math.sin(Date.now() / 300 + this.floatOff) * 8;
+    this.y = this.baseY + Math.sin(Date.now() / 300 + this.floatOff) * 6;
   }
   draw(ctx, cam) {
     if (this.remove) return;
-    ctx.drawImage(sprites.fragment, this.x - cam.x, this.y - cam.y - 2);
+    ctx.drawImage(sprites.fragment, this.x - cam.x, this.y - cam.y - 2, this.w, this.h);
   }
 }
 
 class Spike extends Entity {
-  constructor(x, y) { super(x, y, 40, 40); }
+  constructor(x, y) { super(x, y, TILE, TILE); }
   draw(ctx, cam) {
-    ctx.drawImage(sprites.spike, this.x - cam.x, this.y - cam.y);
+    ctx.drawImage(sprites.spike, this.x - cam.x, this.y - cam.y, TILE, TILE);
   }
 }
 
 class Lava extends Entity {
-  constructor(x, y) { super(x, y, 40, 40); }
+  constructor(x, y) { super(x, y, TILE, TILE); }
   draw(ctx, cam) {
-    ctx.drawImage(sprites.lava, this.x - cam.x, this.y - cam.y);
+    ctx.drawImage(sprites.lava, this.x - cam.x, this.y - cam.y, TILE, TILE);
   }
 }
 
@@ -488,23 +405,42 @@ class Platform {
   get top() { return this.y; }
   get bottom() { return this.y + this.h; }
   draw(ctx, cam) {
-    const img = this.type === 'float' ? sprites.fplatform : sprites.platform;
+    let img = sprites.platform;
+    if (this.type === 'alt') img = sprites.platformAlt;
+    else if (this.type === 'alt2') img = sprites.platformAlt2;
     ctx.drawImage(img, this.x - cam.x, this.y - cam.y, this.w, this.h);
   }
 }
 
 class Exit extends Entity {
-  constructor(x, y) { super(x, y, 32, 48); this.active = false; }
+  constructor(x, y) { super(x, y, 24, 36); this.active = false; this.pulse = 0; }
   draw(ctx, cam) {
+    this.pulse += 0.05;
+    ctx.save();
+    ctx.globalAlpha = 0.6 + 0.4 * Math.sin(this.pulse);
     if (!this.active) {
-      ctx.fillStyle = 'rgba(106,85,255,0.35)';
+      ctx.fillStyle = 'rgba(167, 139, 250, 0.35)';
       ctx.fillRect(this.x - cam.x, this.y - cam.y, this.w, this.h);
       ctx.fillStyle = '#a78bfa';
       ctx.font = '12px monospace';
-      ctx.fillText('??', this.x - cam.x + 8, this.y - cam.y + 26);
-      return;
+      ctx.fillText('??', this.x - cam.x + 6, this.y - cam.y + 20);
+    } else {
+      ctx.drawImage(sprites.exit, this.x - cam.x, this.y - cam.y, this.w, this.h);
     }
-    ctx.drawImage(sprites.exit, this.x - cam.x, this.y - cam.y);
+    ctx.restore();
+  }
+}
+
+class Checkpoint extends Entity {
+  constructor(x, y) { super(x, y, TILE, TILE); this.active = false; }
+  draw(ctx, cam) {
+    ctx.drawImage(sprites.checkpoint, this.x - cam.x, this.y - cam.y, TILE, TILE);
+    if (this.active) {
+      ctx.fillStyle = '#4ade80';
+      ctx.beginPath();
+      ctx.arc(this.x + 9 - cam.x, this.y - 6 - cam.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 }
 
@@ -512,17 +448,7 @@ function rectsOverlap(a, b) {
   return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 }
 
-let particles = [];
-function spawnParticles(x, y, color, count) {
-  for (let i = 0; i < count; i++) particles.push(new Particle(x, y, color));
-}
-function updateParticles() {
-  for (let i = particles.length - 1; i >= 0; i--) {
-    particles[i].update();
-    if (particles[i].life <= 0) particles.splice(i, 1);
-  }
-}
-
+// ── Game ───────────────────────────────────────────────────────────
 class Game {
   constructor() {
     canvas = document.getElementById('gameCanvas');
@@ -536,28 +462,26 @@ class Game {
     this.entities = [];
     this.exit = null;
     this.dialogue = { active: false, name: '', lines: [], index: 0, npc: null, onComplete: null };
-    this.ui = new UI();
-    this.save = { worlds: {}, deaths: 0 };
-    this.transitionTimer = 0;
-    this.bindInput();
-    generateSprites();
-    this.ui.showMenu('start');
+    this.ui = null;
   }
   bindInput() {
-    window.addEventListener('keydown', e => { keys[e.code] = true; });
+    window.addEventListener('keydown', e => {
+      keys[e.code] = true;
+      justPressed[e.code] = true;
+    });
     window.addEventListener('keyup', e => { keys[e.code] = false; });
     document.getElementById('btnStart').onclick = () => { initAudio(); this.startLevel(0); };
-    document.getElementById('btnControls').onclick = () => { this.ui.showMenu('controls'); };
-    document.getElementById('btnBack').onclick = () => { this.ui.showMenu('start'); };
+    document.getElementById('btnControls').onclick = () => { this.showMenu('controls'); };
+    document.getElementById('btnBack').onclick = () => { this.showMenu('start'); };
     document.getElementById('btnRetry').onclick = () => { this.restartLevel(); };
-    document.getElementById('btnMainMenu').onclick = () => { this.ui.showMenu('start'); };
-    document.getElementById('btnPlayAgain').onclick = () => { this.resetGame(); this.ui.showMenu('start'); };
+    document.getElementById('btnMainMenu').onclick = () => { this.showMenu('start'); };
+    document.getElementById('btnPlayAgain').onclick = () => { this.resetGame(); this.showMenu('start'); };
     document.addEventListener('keydown', e => {
       if (e.code === 'KeyQ') this.ui.toggleQuestLog();
-      if ((e.code === 'KeyR') && (this.state === STATE_PLAYING)) this.restartLevel();
+      if (e.code === 'KeyR' && this.state === STATE_PLAYING) this.restartLevel();
     });
   }
-  startLevel(index) {
+  async startLevel(index) {
     this.state = STATE_LEVEL_TRANSITION;
     this.levelIndex = index;
     this.level = LEVELS[index];
@@ -569,7 +493,7 @@ class Game {
     this.dialogue.active = false;
     particles = [];
     this.ui.updateHUD();
-    this.ui.hideDialogue();
+    if (this.ui) this.ui.hideDialogue();
     setTimeout(() => {
       this.state = STATE_PLAYING;
       this.setupLevelEntities();
@@ -581,21 +505,25 @@ class Game {
     for (const p of this.level.platforms) this.entities.push(new Platform(p.x, p.y, p.w, p.h, p.type || 'ground'));
     for (const s of (this.level.spikes || [])) this.entities.push(new Spike(s.x, s.y));
     for (const l of (this.level.lava || [])) this.entities.push(new Lava(l.x, l.y));
-    for (const e of (this.level.enemies || [])) this.entities.push(new Enemy(e.x, e.y, e.range || 80, e.speed || 1.6));
+    for (const e of (this.level.enemies || [])) this.entities.push(new Enemy(e.x, e.y, e.range || 80, e.speed || 1.5));
     for (const c of (this.level.fragments || [])) {
-      const col = new Collectible(c.x, c.y, 'fragment');
+      const col = new Collectible(c.x, c.y);
       col.onCollect = () => this.collectFragment();
       this.entities.push(col);
     }
     for (const n of (this.level.npcs || [])) {
-      this.entities.push(new NPC(n.x, n.y, n.name, n.dialogue, n.quest));
+      const npc = new NPC(n.x, n.y, n.name, n.dialogue, n.quest);
+      this.entities.push(npc);
+    }
+    for (const cp of (this.level.checkpoints || [])) {
+      this.entities.push(new Checkpoint(cp.x, cp.y));
     }
   }
   collectFragment() {
     this.fragments++;
     sfx.collect();
-    spawnParticles(this.player.x + 11, this.player.y, '#f0d16a', 10);
-    this.ui.updateHUD();
+    spawnParticles(this.player.x + 8, this.player.y, '#f0d16a', 10);
+    if (this.ui) this.ui.updateHUD();
     this.checkExit();
     if (this.fragments >= FRAGMENTS_PER_LEVEL) {
       (this.level.quests || []).forEach(q => { if (!q.done) this.completeQuest(q.id); });
@@ -604,22 +532,35 @@ class Game {
   checkExit() {
     if (this.fragments >= FRAGMENTS_PER_LEVEL) this.exit.active = true;
   }
+  completeQuest(questId) {
+    const q = (this.level.quests || []).find(q => q.id === questId);
+    if (q && !q.done) {
+      q.done = true;
+      this.addToast(`Quest complete: ${q.title}`);
+    }
+  }
+  addToast(text) {
+    const el = document.getElementById('toast');
+    el.textContent = text;
+    el.style.opacity = 1;
+    setTimeout(() => { el.style.opacity = 0; }, 2500);
+  }
   restartLevel() {
     this.deaths++;
-    this.ui.updateHUD();
+    if (this.ui) this.ui.updateHUD();
     this.startLevel(this.levelIndex);
   }
   resetGame() {
     this.levelIndex = 0;
     this.fragments = 0;
     this.deaths = 0;
-    this.ui.updateHUD();
+    if (this.ui) this.ui.updateHUD();
   }
   playerDies() {
     this.player.kill();
     this.deaths++;
-    this.ui.updateHUD();
-    setTimeout(() => this.restartLevel(), 800);
+    if (this.ui) this.ui.updateHUD();
+    setTimeout(() => this.restartLevel(), 700);
   }
   openDialogue(npc) {
     if (this.state !== STATE_PLAYING) return;
@@ -629,9 +570,8 @@ class Game {
     this.dialogue.name = npc.name;
     this.dialogue.lines = [...npc.dialogue];
     this.dialogue.index = 0;
-    this.dialogue.onComplete = npc.onDialogueComplete ? npc.onDialogueComplete.bind(null, npc, this) : null;
     npc.talked = true;
-    this.ui.showDialogue(this.dialogue);
+    if (this.ui) this.ui.showDialogue(this.dialogue);
     sfx.talk();
   }
   advanceDialogue() {
@@ -639,35 +579,27 @@ class Game {
     this.dialogue.index++;
     if (this.dialogue.index >= this.dialogue.lines.length) {
       this.dialogue.active = false;
-      this.ui.hideDialogue();
+      if (this.ui) this.ui.hideDialogue();
       this.state = STATE_PLAYING;
       if (this.dialogue.onComplete) this.dialogue.onComplete();
       this.dialogue.onComplete = null;
       this.dialogue.npc = null;
     } else {
-      this.ui.showDialogue(this.dialogue);
+      if (this.ui) this.ui.showDialogue(this.dialogue);
       sfx.talk();
-    }
-  }
-  completeQuest(questId) {
-    const w = this.level;
-    if (!w.quests) return;
-    const q = w.quests.find(q => q.id === questId);
-    if (q && !q.done) {
-      q.done = true;
-      this.ui.addToast(`Quest complete: ${q.title}`);
     }
   }
   victory() {
     this.state = STATE_VICTORY;
     sfx.win();
-    this.ui.showMenu('victory');
+    if (this.ui) this.ui.showMenu('victory');
   }
-  update(dt) {
+  update() {
+    justPressed = {};
     if (this.state === STATE_PLAYING || this.state === STATE_DIALOGUE) {
       this.player.update(this.level);
       for (const e of this.entities) {
-        if (e instanceof Platform) continue;
+        if (e instanceof Platform || e instanceof Spike || e instanceof Lava || e instanceof Checkpoint) continue;
         e.update(this.level);
       }
       updateParticles();
@@ -678,27 +610,23 @@ class Game {
   checkCollisions() {
     const p = this.player;
     if (p.dead) return;
-    // fragments
     for (const e of this.entities) {
       if (e instanceof Collectible && !e.remove && p.collidesWith(e)) {
         e.remove = true;
         e.onCollect();
       }
     }
-    // exit
     if (this.exit && this.exit.active && p.collidesWith(this.exit)) {
       this.nextLevel();
     }
-    // enemies & hazards
     const hurt = () => this.playerDies();
     for (const e of this.entities) {
       if (e instanceof Enemy && p.collidesWith(e)) {
-        // stomp
-        if (p.vy > 0 && p.rect.bottom - 6 <= e.rect.top + 4) {
+        if (p.vy > 0 && p.bottom - 6 <= e.top + 4) {
           e.dead = true;
-          p.vy = JUMP_FORCE * 0.75;
-          this.player.jumps = 0;
-          spawnParticles(e.x + 15, e.y, '#7a2e2e', 8);
+          p.vy = JUMP_FORCE * 0.7;
+          p.jumps = 0;
+          spawnParticles(e.x + 10, e.y, '#7a2e2e', 8);
           sfx.collect();
         } else {
           hurt();
@@ -706,13 +634,11 @@ class Game {
       }
       if ((e instanceof Spike || e instanceof Lava) && p.collidesWith(e)) hurt();
     }
-    // npcs
-    if ((keys['KeyE'] && !this.ePressed)) {
+    if (justPressed['KeyE']) {
       for (const e of this.entities) {
         if (e instanceof NPC && p.collidesWith(e)) { this.openDialogue(e); break; }
       }
     }
-    this.ePressed = keys['KeyE'];
   }
   updateCamera() {
     const p = this.player;
@@ -720,13 +646,13 @@ class Game {
     let ty = p.y - CANVAS_H / 2 + p.h / 2;
     tx = Math.max(0, Math.min(tx, this.level.width - CANVAS_W));
     ty = Math.max(0, Math.min(ty, this.level.height - CANVAS_H));
-    camera.x += (tx - camera.x) * 0.12;
-    camera.y += (ty - camera.y) * 0.12;
+    camera.x += (tx - camera.x) * 0.1;
+    camera.y += (ty - camera.y) * 0.1;
   }
   nextLevel() {
     if (this.levelIndex < NUM_LEVELS - 1) {
       this.state = STATE_LEVEL_TRANSITION;
-      this.ui.hideDialogue();
+      if (this.ui) this.ui.hideDialogue();
       setTimeout(() => this.startLevel(this.levelIndex + 1), 900);
     } else {
       this.victory();
@@ -735,40 +661,51 @@ class Game {
   draw() {
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
     if (this.level) {
-      // background gradient
-      const grad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-      grad.addColorStop(0, this.level.skyTop || '#6fa8dc');
-      grad.addColorStop(1, this.level.skyBot || '#2d4a6a');
-      ctx.fillStyle = grad;
+      ctx.fillStyle = this.level.skyTop || '#6fa8dc';
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
       ctx.save();
       ctx.translate(-camera.x, -camera.y);
-      // draw platforms / static env
+      this.drawBackground(ctx);
       for (const e of this.entities) {
         if (e instanceof Platform || e instanceof Spike || e instanceof Lava) e.draw(ctx, camera);
       }
-      // exit
       if (this.exit) this.exit.draw(ctx, camera);
-      // dynamic entities
+      for (const e of this.entities) {
+        if (e instanceof Checkpoint) e.draw(ctx, camera);
+      }
       this.player.draw(ctx, camera);
       for (const e of this.entities) {
-        if (!(e instanceof Platform || e instanceof Spike || e instanceof Lava)) e.draw(ctx, camera);
+        if (!(e instanceof Platform || e instanceof Spike || e instanceof Lava || e instanceof Checkpoint)) e.draw(ctx, camera);
       }
       for (const p of particles) p.draw(ctx, camera);
       ctx.restore();
     }
     this.ui.draw();
   }
-  loop(ts) {
-    const dt = Math.min((ts - (this.lastTs || ts)) / 1000, 0.05);
-    this.lastTs = ts;
-    this.update(dt);
-    this.draw();
-    requestAnimationFrame(ts => this.loop(ts));
+  drawBackground(ctx) {
+    const bg = this.level.bgTile || sprites.bgSky;
+    const bw = 24, bh = 24;
+    const startX = Math.floor(camera.x / bw) - 1;
+    const endX = Math.floor((camera.x + CANVAS_W) / bw) + 1;
+    const startY = Math.floor(camera.y / bh) - 1;
+    const endY = Math.floor((camera.y + CANVAS_H) / bh) + 1;
+    for (let gy = startY; gy <= endY; gy++) {
+      for (let gx = startX; gx <= endX; gx++) {
+        ctx.drawImage(bg, gx * bw - camera.x, gy * bh - camera.y, bw, bh);
+      }
+    }
   }
-  start() { requestAnimationFrame(ts => this.loop(ts)); }
+  loop(ts) {
+    const dt = Math.min((ts - lastTime) / 1000, 0.05);
+    lastTime = ts;
+    this.update();
+    this.draw();
+    requestAnimationFrame(t => this.loop(t));
+  }
+  start() { lastTime = performance.now(); requestAnimationFrame(t => this.loop(t)); }
 }
 
+// ── UI ─────────────────────────────────────────────────────────────
 class UI {
   constructor() {
     this.fragEl = document.getElementById('fragCount');
@@ -780,11 +717,6 @@ class UI {
     this.questLogEl = document.getElementById('questLog');
     this.questListEl = document.getElementById('questLogList');
     this.questOpen = false;
-    this.toastTimer = 0;
-    this.toastText = '';
-    this.toastEl = document.createElement('div');
-    this.toastEl.style.cssText = 'position:absolute;top:18px;left:50%;transform:translateX(-50%);background:rgba(18,20,30,0.9);color:#e0c78a;padding:8px 16px;border-radius:8px;border:2px solid #e0c78a;font-weight:700;pointer-events:none;z-index:25;opacity:0;transition:opacity .2s;';
-    document.getElementById('game-container').appendChild(this.toastEl);
   }
   updateHUD() {
     this.fragEl.textContent = `${game.fragments}/${FRAGMENTS_PER_LEVEL}`;
@@ -798,17 +730,12 @@ class UI {
   }
   hideDialogue() { this.dialogueEl.classList.add('hidden'); }
   showMenu(name) {
-    ['startMenu','controlsMenu','gameOverMenu','victoryMenu','overlay'].forEach(id => {
+    ['startMenu', 'controlsMenu', 'gameOverMenu', 'victoryMenu'].forEach(id => {
       document.getElementById(id).classList.add('hidden');
     });
-    document.getElementById(name + 'Menu')?.classList.remove('hidden');
-    if (name === 'start' || name === 'victory') document.getElementById('overlay').classList.remove('hidden');
-  }
-  addToast(text) {
-    this.toastText = text;
-    this.toastEl.textContent = text;
-    this.toastEl.style.opacity = 1;
-    this.toastTimer = 120;
+    document.getElementById('overlay').classList.remove('hidden');
+    const el = document.getElementById(name + 'Menu');
+    if (el) el.classList.remove('hidden');
   }
   toggleQuestLog() {
     if (game.state === STATE_MENU) return;
@@ -826,14 +753,13 @@ class UI {
   }
   draw() {
     this.updateHUD();
-    if (this.toastTimer > 0) {
-      this.toastTimer--;
-      if (this.toastTimer === 0) this.toastEl.style.opacity = 0;
-    }
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+// ── Boot ───────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadAllAssets();
   game = new Game();
+  game.ui = new UI();
   game.start();
 });
